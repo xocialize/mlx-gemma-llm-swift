@@ -42,8 +42,11 @@ private func engine(budgetBytes: UInt64) -> MLXServeEngine {
 
     @Test func footprintSplitsResidentFromActivation() {
         let model = GemmaModel.default
-        #expect(model.residentBytes == 7_500_000_000)  // measured on disk 2026-07-02
+        #expect(model.residentBytes == 10_000_000_000)  // mem-bench floor 9.32 GB (2026-07-02)
+        #expect(model.residentBytes > model.onDiskBytes)  // floor > disk: materialized + overhead
         #expect(model.peakActivationBytes > model.kvCacheBytes(maxTokens: GemmaModel.contextEnvelopeTokens))
+        // Measured activation at the envelope was 0.37 GB; the declaration must cover it.
+        #expect(model.peakActivationBytes > 370_000_000)
         #expect(model.requirements.footprints.first?.residentBytes == model.residentBytes)
     }
 

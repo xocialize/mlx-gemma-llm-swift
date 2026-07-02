@@ -106,10 +106,19 @@ public struct GemmaModel: Sendable, Codable, Equatable, Hashable {
 
     private var paramsIncludingVisionBillions: Double { size.paramsBillions + 0.4 }
 
-    /// The persistent weights floor — what stays resident while loaded. On-disk bytes of the
-    /// selected checkpoint (mmap'd, paged on demand); the KV/prefill transient is split out into
-    /// `peakActivationBytes` so the engine reserves ONE shared activation across co-residents.
-    public var residentBytes: UInt64 { onDiskBytes }
+    /// The persistent floor — what stays resident while loaded. MEASURED via
+    /// `RunGemmaLLM --mem-bench` (post-warmup + clearCache phys_footprint), NOT the on-disk
+    /// bytes: the floor lands above disk (text weights materialized by the first forward +
+    /// tokenizer/runtime overhead ≈ +1.8 GB on 4-bit) even though the vision tower never loads.
+    /// int4 measured 9.32 GB (2026-07-02) → declared 10 GB. Other quants are the measured
+    /// overhead added to their weight estimate — re-measure when a consumer validates them.
+    public var residentBytes: UInt64 {
+        switch quant {
+        case .int4: return 10_000_000_000  // measured floor 9.32 GB + headroom
+        case .int8: return 16_000_000_000  // est: ~13 GB weights + measured ~2.4 GB overhead
+        default: return 27_000_000_000     // bf16 est: ~24.4 GB weights + overhead
+        }
+    }
 
     /// The documented context envelope (prompt + generated tokens) the declared footprint is
     /// sized for. Prompt-enhancement calls (the first consumer) run ~1–2k total tokens; 2048
@@ -131,16 +140,15 @@ public struct GemmaModel: Sendable, Codable, Equatable, Hashable {
         return UInt64((globalElems + slidingElems) * perLayerHead * cacheDtypeBytes)
     }
 
-    /// The transient activation peak at the documented envelope.
-    ///
-    /// Analytic KV at 2048 tokens ≈ 0.47 GB (134 MB global + 336 MB sliding-capped). The Qwen
-    /// package's measurement lesson says prefill COMPUTE SCRATCH dominates the persisted cache —
-    /// Gemma-3 is dense softmax (no GDN chunked-scan), so the Qwen per-token figure doesn't
-    /// transfer; this initial declaration is KV + a width-scaled scratch allowance.
-    /// **ESTIMATE — P2 re-measures this empirically (mem-bench at the 2048 envelope) and the
-    /// measured value replaces it before promotion.**
+    /// The transient activation peak at the documented envelope. MEASURED via
+    /// `RunGemmaLLM --mem-bench` at ~2k total tokens (≈1.2k prefill + 800 generated):
+    /// **0.37 GB** over the floor (2026-07-02) — tracking the analytic hybrid KV closely.
+    /// The Qwen package's prefill-scratch blowup (~2 GB at the same envelope) does NOT
+    /// reproduce here: that was the GatedDeltaNet chunked-scan; dense softmax Gemma has no
+    /// such scratch. Declared as analytic KV + 0.5 GB headroom (≈ 0.97 GB at the envelope),
+    /// which stays honest if a caller pads the prompt toward the full window.
     public var peakActivationBytes: UInt64 {
-        kvCacheBytes(maxTokens: Self.contextEnvelopeTokens) + 2_500_000_000
+        kvCacheBytes(maxTokens: Self.contextEnvelopeTokens) + 500_000_000
     }
 
     /// Cost-to-run footprint for the Model Manager (C10): weights floor + split-out transient.
