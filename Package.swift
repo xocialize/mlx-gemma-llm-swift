@@ -17,8 +17,7 @@ import PackageDescription
 // out-of-engine `GemmaTextGenerator` load; this package moves it under MLXEngine governance
 // (admission, footprint charge, prewarm, license gate, store integration).
 //
-// NB: depends on the LOCAL engine (path dep) until the engine release that carries
-// `SPDXLicense.gemmaTerms` is tagged; switch to the URL dep at promotion.
+// Engine ≥0.18.0 carries `SPDXLicense.gemmaTerms` (the weights license this manifest declares).
 let package = Package(
     name: "mlx-gemma-llm-swift",
     platforms: [
@@ -28,8 +27,7 @@ let package = Package(
         .library(name: "MLXGemmaLLM", targets: ["MLXGemmaLLM"]),
     ],
     dependencies: [
-        // Local engine until the .gemmaTerms release is tagged (then: url + from:).
-        .package(path: "../../../MLXEngine/mlx-engine-swift"),
+        .package(url: "https://github.com/xocialize/mlx-engine-swift", from: "0.18.0"),
         // MLX-Swift LM runtime — 3.31.4 is the fleet-validated floor (LTX gates green on it).
         .package(url: "https://github.com/ml-explore/mlx-swift-lm", .upToNextMajor(from: "3.31.4")),
         // mlx-swift, for MLX.Memory.clearCache() in unload(). Matches mlx-swift-lm's resolution.
