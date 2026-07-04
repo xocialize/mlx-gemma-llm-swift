@@ -93,6 +93,12 @@ public final class GemmaLLMPackage: ModelPackage {
     }
 
     /// Page the working set in. Idempotent when already resident.
+    ///
+    /// Dir-less configurations auto-materialize (engine ≥0.19.0): missing declared
+    /// `weightSources` download into the store's `<root>/<org>/<name>` layout with per-file
+    /// progress via `WeightDownloadProgress` (the engine binds the sink around this call and
+    /// surfaces `.downloading`), then loading proceeds from the store-resolved directory.
+    /// Explicit-directory configs never touch the network (the DEV_ARCHIVE / LTX-app case).
     public func load() async throws {
         guard container == nil else { return }
         let loaded: ModelContainer
@@ -106,18 +112,21 @@ public final class GemmaLLMPackage: ModelPackage {
                     expected: "a published mlx-community quant or an explicit modelDirectory",
                     got: configuration.model.displayName)
             }
-            let revision = configuration.revision ?? "main"
-            if let root = configuration.modelsRootDirectory {
-                // Materialize into the engine-chosen models folder (caller holds
-                // security-scoped access) by pointing the Hub cache there.
-                let client = HubClient(cache: HubCache(cacheDirectory: root))
-                loaded = try await loadModelContainer(
-                    from: #hubDownloader(client),
-                    using: #huggingFaceTokenizerLoader(),
-                    id: repo,
-                    revision: revision)
+            if let root = configuration.modelsRootDirectory,
+               let dir = ModelStore(root: root).directory(for: repo)
+            {
+                // Auto-materialize into the engine-chosen models folder (caller holds
+                // security-scoped access), then load from the store layout.
+                let missing = configuration.missingWeightSources(storeRoot: root)
+                if !missing.isEmpty {
+                    try await WeightMaterializer.materialize(missing, into: root)
+                }
+                loaded = try await #huggingFaceLoadModelContainer(
+                    configuration: ModelConfiguration(directory: dir))
             } else {
-                let modelConfig = ModelConfiguration(id: repo, revision: revision)
+                // No store stamped: fall back to the downloader's default Hub cache.
+                let modelConfig = ModelConfiguration(
+                    id: repo, revision: configuration.revision ?? "main")
                 loaded = try await #huggingFaceLoadModelContainer(configuration: modelConfig)
             }
         }

@@ -139,12 +139,8 @@ private func engine(budgetBytes: UInt64) -> MLXServeEngine {
         #expect(config.peakActivationBytesHint == config.model.peakActivationBytes)
     }
 
-    @Test func prewarmOnlyForDirectDirectory() {
-        var config = GemmaLLMConfiguration()
-        #expect(config.prewarmPaths.isEmpty)
-        config.modelDirectory = URL(fileURLWithPath: "/Volumes/DEV_ARCHIVE/models/gemma")
-        #expect(config.prewarmPaths == [URL(fileURLWithPath: "/Volumes/DEV_ARCHIVE/models/gemma")])
-    }
+    // Prewarm behavior (explicit dir wins; store-layout resolution; empty without either)
+    // is covered in MaterializationTests alongside the rest of the WeightSourcing contract.
 }
 
 @Suite struct GemmaAdmissibilityTests {
