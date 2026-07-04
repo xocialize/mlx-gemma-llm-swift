@@ -7,8 +7,8 @@ import MLXHuggingFace
 import HuggingFace
 import Tokenizers
 
-/// A Gemma-3 instruction-tuned model exposing the canonical `llm` surface — the governed
-/// counterpart of running Gemma out-of-engine.
+/// A Gemma instruction-tuned model (family axis: Gemma-3 / Gemma-4) exposing the canonical
+/// `llm` surface — the governed counterpart of running Gemma out-of-engine.
 ///
 /// One `ModelPackage`, one surface. The engine owns the lifecycle (inversion of control): it
 /// constructs this from a `GemmaLLMConfiguration`, prewarms + pages weights in with `load()`,
@@ -16,9 +16,12 @@ import Tokenizers
 /// `InferenceActor` (C13).
 ///
 /// **Text factory only.** This package links `MLXLLM` and never `MLXVLM`, so the shared
-/// `gemma3` architecture key resolves to `Gemma3TextModel` (text-only; the checkpoint's SigLIP
-/// vision tower stays on disk, unloaded). `load()` verifies the resolution and throws a
-/// diagnosable error if a host process re-introduced MLXVLM (see `WrongModelTypeError`).
+/// architecture keys resolve to the TEXT models — `gemma3` → `Gemma3TextModel` (the SigLIP
+/// vision tower stays on disk, unloaded) and `gemma4_unified` → `Gemma4Model` (mlx-swift-lm
+/// ≥ 3.31.4; its `sanitize` strips the `vision_embedder`/audio weights). Both keys are
+/// registered in BOTH factories upstream, so the shadowing hazard is identical across
+/// families: `load()` verifies the resolution and throws a diagnosable error if a host
+/// process re-introduced MLXVLM (see `WrongModelTypeError`).
 @InferenceActor
 public final class GemmaLLMPackage: ModelPackage {
     public typealias Configuration = GemmaLLMConfiguration
@@ -29,9 +32,13 @@ public final class GemmaLLMPackage: ModelPackage {
     public nonisolated static var manifest: PackageManifest {
         let target = GemmaModel.default
         return PackageManifest(
-            // Weights: Gemma Terms of Use (LicenseRef-Gemma-Terms) — reviewed 2026-07-02,
-            // permissive-with-AUP, on the engine's permissiveAllowlist. Obligations when
-            // SHIPPING the weights: terms passthrough + the §3.1 notice. Port code: Apache-2.0.
+            // Weights: the manifest is static (one declaration for the package), so it
+            // carries the STRICTER of the two family licenses — Gemma Terms of Use
+            // (LicenseRef-Gemma-Terms), reviewed 2026-07-02, permissive-with-AUP, on the
+            // engine's permissiveAllowlist. Obligations when SHIPPING gemma-3 weights:
+            // terms passthrough + the §3.1 notice. Gemma-4 weights are Apache-2.0
+            // (strictly more permissive — see `GemmaFamily.weightLicense`), so the gate
+            // stays conservative-correct for every variant. Port code: Apache-2.0.
             license: LicenseDeclaration(weightLicense: .gemmaTerms, portCodeLicense: .apache2),
             provenance: Provenance(
                 sourceRepo: target.weightsRepo ?? "mlx-community/gemma-3-12b-it-4bit",
@@ -43,29 +50,36 @@ public final class GemmaLLMPackage: ModelPackage {
                 SpecialtyWeight(.general, strength: 0.7)
             ],
             surfaces: [
+                // The surface name stays "gemma-3-llm" for PackageID stability (existing
+                // registrations key on it). A Gemma-4 configuration is registered from the
+                // same package type — pass an explicit `id:` (e.g. "gemma-4-llm") to
+                // co-register both families side by side.
                 LLMContract.descriptor(
                     name: "gemma-3-llm",
-                    summary: "Gemma-3 instruction-tuned text generation (MLX, text factory only). "
-                        + "Same checkpoint the LTX-2.3 stack uses as its text encoder, so hosts "
-                        + "carrying LTX get a governed prompt-enhancement LLM at zero extra "
-                        + "download."
+                    summary: "Gemma instruction-tuned text generation (MLX, text factory "
+                        + "only; family axis gemma-3/gemma-4 via the configuration). The "
+                        + "gemma-3 default is the same checkpoint the LTX-2.3 stack uses as "
+                        + "its text encoder, so hosts carrying LTX get a governed "
+                        + "prompt-enhancement LLM at zero extra download."
                 )
             ]
         )
     }
 
-    /// Thrown when the shared `gemma3` key resolves to something other than `Gemma3TextModel` —
-    /// in practice the HOST process linked MLXVLM (directly or via another package), whose
-    /// factory is probed first in mlx-swift-lm's process-global registry and shadows the text
-    /// architecture with the multimodal `Gemma3`. Generation would still work, but the vision
-    /// tower loads too (footprint drift) and text-only consumers in the same process break
-    /// (the LTX BRIDGE-LTX-003 defect) — fail loud instead.
+    /// Thrown when the shared architecture key resolves to something other than the family's
+    /// TEXT model (`Gemma3TextModel` / `Gemma4Model`) — in practice the HOST process linked
+    /// MLXVLM (directly or via another package), whose factory is probed first in
+    /// mlx-swift-lm's process-global registry and shadows the text architecture with the
+    /// multimodal variant (`Gemma3` / `Gemma4Unified`). Generation would still work, but the
+    /// vision weights load too (footprint drift) and text-only consumers in the same process
+    /// break (the LTX BRIDGE-LTX-003 defect) — fail loud instead.
     public struct WrongModelTypeError: Error, CustomStringConvertible {
+        public let expected: String
         public let actual: String
         public var description: String {
-            "GemmaLLMPackage: expected Gemma3TextModel, got \(actual). A dependency in the host "
-                + "app links MLXVLM, which shadows 'gemma3' in mlx-swift-lm's process-global "
-                + "factory registry. Remove the MLXVLM-linking dependency."
+            "GemmaLLMPackage: expected \(expected), got \(actual). A dependency in the host "
+                + "app links MLXVLM, which shadows the architecture key in mlx-swift-lm's "
+                + "process-global factory registry. Remove the MLXVLM-linking dependency."
         }
     }
 
@@ -108,9 +122,10 @@ public final class GemmaLLMPackage: ModelPackage {
             }
         }
         // Verify the text factory won the registry (see WrongModelTypeError).
+        let expected = configuration.model.family.expectedTextModelType
         let typeName = await loaded.perform { String(describing: type(of: $0.model)) }
-        guard typeName.hasSuffix("Gemma3TextModel") else {
-            throw WrongModelTypeError(actual: typeName)
+        guard typeName.hasSuffix(expected) else {
+            throw WrongModelTypeError(expected: expected, actual: typeName)
         }
         container = loaded
     }
@@ -147,8 +162,8 @@ public final class GemmaLLMPackage: ModelPackage {
         let prompt = conversational.last?.content ?? ""
         let priorTurns = conversational.isEmpty ? [] : Array(conversational.dropLast())
 
-        // No mode → template-kwarg mapping: Gemma-3 has no thinking toggle (unlike Qwen3.5),
-        // so `Mode` intentionally injects nothing here.
+        // No mode → template-kwarg mapping: Gemma (3 and 4 alike) has no thinking toggle
+        // (unlike Qwen3.5), so `Mode` intentionally injects nothing here.
         let text = try await Self.generate(
             container: container,
             instructions: instructions.isEmpty ? nil : instructions,

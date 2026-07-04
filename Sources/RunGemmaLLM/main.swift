@@ -1,10 +1,12 @@
-// RunGemmaLLM — live gates for the Gemma-3 `llm` package (GPU inference runs here, not in the
+// RunGemmaLLM — live gates for the Gemma `llm` package (GPU inference runs here, not in the
 // SPM test product, whose metallib is unreliable — the fleet CLI-gate convention).
 //
 //   swift run -c release RunGemmaLLM --smoke [modelDir]       one governed-shape generate
 //   swift run -c release RunGemmaLLM --mem-bench [modelDir]   split-footprint measurement:
 //       resident floor (post-load) + activation peak at the ~2k-token documented envelope,
 //       sampled via phys_footprint (the governor's basis) — feeds GemmaModel.peakActivationBytes.
+//   Add --gemma4 to run the Gemma-4 12B variant (gemma4_unified via the text factory) — the
+//   configuration then carries the gemma-4 catalog entry so labels/declarations match.
 
 import Foundation
 import MLX
@@ -91,8 +93,8 @@ func enhancementRequest(maxTokens: Int) -> LLMRequest {
 }
 
 @InferenceActor
-func smoke(modelDir: String) async throws {
-    let cfg = GemmaLLMConfiguration(modelDirectory: URL(fileURLWithPath: modelDir))
+func smoke(modelDir: String, model: GemmaModel) async throws {
+    let cfg = GemmaLLMConfiguration(model: model, modelDirectory: URL(fileURLWithPath: modelDir))
     prewarmFiles(in: URL(fileURLWithPath: modelDir))
     let pkg = GemmaLLMPackage(configuration: cfg)
     let t0 = Date()
@@ -107,8 +109,8 @@ func smoke(modelDir: String) async throws {
 }
 
 @InferenceActor
-func memBench(modelDir: String) async throws {
-    let cfg = GemmaLLMConfiguration(modelDirectory: URL(fileURLWithPath: modelDir))
+func memBench(modelDir: String, model: GemmaModel) async throws {
+    let cfg = GemmaLLMConfiguration(model: model, modelDirectory: URL(fileURLWithPath: modelDir))
     print("[mem-bench] \(cfg.model.displayName) · envelope \(GemmaModel.contextEnvelopeTokens) tokens")
     let p0 = Date()
     prewarmFiles(in: URL(fileURLWithPath: modelDir))
@@ -141,14 +143,22 @@ func memBench(modelDir: String) async throws {
     await pkg.unload()
 }
 
+let defaultGemma4ModelDir = "/Volumes/DEV_ARCHIVE/models/mlx-community/gemma-4-12b-it-4bit"
+
 let args = CommandLine.arguments
 let positional = args.dropFirst().filter { !$0.hasPrefix("--") }
-let modelDir = positional.first ?? defaultModelDir
+let gemma4 = args.contains("--gemma4")
+let model = gemma4
+    ? GemmaModel(family: .gemma4, size: .b12, quant: .int4)
+    : GemmaModel.default
+let modelDir = positional.first ?? (gemma4 ? defaultGemma4ModelDir : defaultModelDir)
 
 if args.contains("--mem-bench") {
-    try await memBench(modelDir: modelDir)
+    try await memBench(modelDir: modelDir, model: model)
 } else if args.contains("--smoke") {
-    try await smoke(modelDir: modelDir)
+    try await smoke(modelDir: modelDir, model: model)
 } else {
-    print("usage: RunGemmaLLM --smoke | --mem-bench  [modelDir]  (default \(defaultModelDir))")
+    print("usage: RunGemmaLLM --smoke | --mem-bench  [--gemma4]  [modelDir]")
+    print("  default modelDir: \(defaultModelDir)")
+    print("  default --gemma4 modelDir: \(defaultGemma4ModelDir)")
 }
