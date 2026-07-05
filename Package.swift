@@ -32,7 +32,11 @@ let package = Package(
         .library(name: "MLXGemmaLLM", targets: ["MLXGemmaLLM"]),
     ],
     dependencies: [
-        .package(url: "https://github.com/xocialize/mlx-engine-swift", from: "0.19.0"),
+        // ≥0.22.0: contract 1.16.0 — LLMRequest.responseFormat (structured output, N6).
+        .package(url: "https://github.com/xocialize/mlx-engine-swift", from: "0.22.0"),
+        // JSON grammar-constrained decoding (the responseFormat runtime, shared with the
+        // qwen package).
+        .package(url: "https://github.com/xocialize/mlx-constrained-decoding-swift", from: "0.1.0"),
         // MLX-Swift LM runtime — 3.31.4 is the fleet-validated floor (LTX gates green on it)
         // AND the first tag registering `gemma4_unified` in the text factory (Gemma-4 12B).
         .package(url: "https://github.com/ml-explore/mlx-swift-lm", .upToNextMajor(from: "3.31.4")),
@@ -47,6 +51,7 @@ let package = Package(
             name: "MLXGemmaLLM",
             dependencies: [
                 .product(name: "MLXToolKit", package: "mlx-engine-swift"),
+                .product(name: "MLXConstrainedDecoding", package: "mlx-constrained-decoding-swift"),
                 .product(name: "MLX", package: "mlx-swift"),
                 .product(name: "MLXLMCommon", package: "mlx-swift-lm"),
                 // Text factory ONLY — see the design constraint above. Do NOT add MLXVLM.

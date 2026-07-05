@@ -1,5 +1,5 @@
 {
-  "originHash" : "aa6b08d90ed8dea2599b945430cd7ccc1440d576f69305e146940bdcdb4413ef",
+  "originHash" : "e35f1de2f858fd825e346a6dca34fa42c58197d2b27b4ef7f0c1e9ac6e3e85f0",
   "pins" : [
     {
       "identity" : "eventsource",
@@ -11,12 +11,21 @@
       }
     },
     {
+      "identity" : "mlx-constrained-decoding-swift",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/xocialize/mlx-constrained-decoding-swift",
+      "state" : {
+        "revision" : "846adbebe5f8cae995415998f9e9bf0afce4cf11",
+        "version" : "0.1.0"
+      }
+    },
+    {
       "identity" : "mlx-engine-swift",
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/xocialize/mlx-engine-swift",
       "state" : {
-        "revision" : "ee6508718d249761185d1c4cd5ae3735205ebc4e",
-        "version" : "0.19.0"
+        "revision" : "bc8f7b51ce63b95c73c016a9ea44c20a24bf8286",
+        "version" : "0.22.0"
       }
     },
     {

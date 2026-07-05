@@ -1,6 +1,7 @@
 import Foundation
 import MLX
 import MLXToolKit
+import MLXConstrainedDecoding
 import MLXLMCommon
 import MLXLLM
 import MLXHuggingFace
@@ -60,7 +61,10 @@ public final class GemmaLLMPackage: ModelPackage {
                         + "only; family axis gemma-3/gemma-4 via the configuration). The "
                         + "gemma-3 default is the same checkpoint the LTX-2.3 stack uses as "
                         + "its text encoder, so hosts carrying LTX get a governed "
-                        + "prompt-enhancement LLM at zero extra download."
+                        + "prompt-enhancement LLM at zero extra download.",
+                    // Honest C11 advertisement: grammar-masked decode via
+                    // MLXConstrainedDecoding (contract 1.16.0).
+                    supportsStructuredOutput: true
                 )
             ]
         )
@@ -86,6 +90,16 @@ public final class GemmaLLMPackage: ModelPackage {
     private let configuration: Configuration
     /// The resident model + tokenizer, paged in by `load()`. `nil` until loaded.
     private var container: ModelContainer?
+
+    /// Vocab classification for constrained decoding (contract 1.16.0 `responseFormat`) —
+    /// built once per residency on the first structured request (a full-vocab pass over the
+    /// ~262k-entry SentencePiece tokenizer; not paid by freeform-only consumers), dropped
+    /// with the weights on `unload()`.
+    private var constrainedVocabulary: TokenVocabulary?
+
+    /// Masking telemetry of the most recent structured run — surfaced for the
+    /// `RunGemmaLLM --structured` gate's latency report.
+    public private(set) var lastStructuredStats: JSONConstraintEngine.Stats?
 
     /// Cheap construction — no compute, no weight paging (C13). Residency is `load()`'s job.
     public nonisolated init(configuration: Configuration) {
@@ -141,6 +155,7 @@ public final class GemmaLLMPackage: ModelPackage {
 
     /// Release the working set; the instance survives for a later `load()`.
     public func unload() async {
+        constrainedVocabulary = nil
         container = nil
         MLX.Memory.clearCache()  // release the retained MLX pool so eviction frees RSS
     }
@@ -159,6 +174,15 @@ public final class GemmaLLMPackage: ModelPackage {
         if let temperature = llm.parameters.temperature { parameters.temperature = Float(temperature) }
         if let topP = llm.parameters.topP { parameters.topP = Float(topP) }
         parameters.maxTokens = llm.parameters.maxTokens
+
+        // Structured output (contract 1.16.0): bypass ChatSession — mlx-swift-lm 3.31.x has
+        // no processor-injection seam through GenerateParameters/ChatSession — and drive
+        // TokenIterator directly with the grammar-masking LogitProcessor (same wiring as
+        // mlx-qwen-llm-swift; the kit is shared).
+        if llm.responseFormat != nil {
+            return try await runStructured(container: container, request: llm,
+                                           parameters: parameters)
+        }
 
         // System turns become session instructions.
         let instructions = llm.messages
@@ -181,6 +205,101 @@ public final class GemmaLLMPackage: ModelPackage {
             parameters: parameters
         )
         return LLMResponse(text: text, finishReason: .stop)
+    }
+
+    // MARK: - Structured output (contract 1.16.0, ENGINE-NEEDS N6)
+
+    /// Grammar-constrained generation for `responseFormat` requests: template the full
+    /// message list via `UserInput`/`UserInputProcessor.prepare`, then drive `TokenIterator`
+    /// with `JSONConstrainedLogitProcessor` masking every token that can't extend a valid
+    /// JSON prefix. Generation stops by construction once the top-level value completes.
+    private func runStructured(container: ModelContainer,
+                               request llm: LLMRequest,
+                               parameters: GenerateParameters) async throws -> LLMResponse {
+        guard let format = llm.responseFormat else {
+            throw PackageError.configurationMismatch(expected: "responseFormat", got: "nil")
+        }
+
+        // Contract format → grammar container. C12: defaults on both additive enums.
+        let grammarContainer: JSONStateMachine.Container
+        switch format {
+        case .json(let container):
+            switch container {
+            case .object: grammarContainer = .object
+            case .array:  grammarContainer = .array
+            case .any:    grammarContainer = .any
+            @unknown default: grammarContainer = .any
+            }
+        case .jsonSchema(let schema):
+            // V1 best-effort lane: valid-JSON syntax + container inferred from the schema
+            // root; field shape stays prompt-steered (documented in the contract).
+            grammarContainer = JSONSchemaHint.container(fromSchema: schema)
+        @unknown default:
+            throw PackageError.unsupportedRequestFeature(
+                "responseFormat: unrecognized case (package built against an older contract)")
+        }
+
+        // Once-per-residency vocab classification (SentencePiece pieces → bytes).
+        if constrainedVocabulary == nil {
+            constrainedVocabulary = await container.perform { context in
+                var eosIDs = context.configuration.eosTokenIds
+                if let id = context.tokenizer.eosTokenId { eosIDs.insert(id) }
+                for token in context.configuration.extraEOSTokens {
+                    if let id = context.tokenizer.convertTokenToId(token) { eosIDs.insert(id) }
+                }
+                return TokenVocabulary(
+                    pieceForID: { context.tokenizer.convertIdToToken($0) },
+                    eosTokenIDs: eosIDs)
+            }
+        }
+        guard let vocabulary = constrainedVocabulary else { throw PackageError.notLoaded }
+
+        // Same message mapping as the freeform path (system → instructions up front).
+        // `Chat.Message` is not Sendable, so the Sendable pieces cross into `perform` and
+        // the chat history materializes inside it.
+        let instructions = llm.messages
+            .filter { $0.role == .system }
+            .map(\.content)
+            .joined(separator: "\n\n")
+        let turns = llm.messages.filter { $0.role != .system }
+
+        // Backstop cap: constrained decode force-stops at the complete value (or a grammar
+        // dead end), but cap pathological in-string rambles when the caller didn't.
+        let maxTokens = parameters.maxTokens ?? 2048
+
+        let (text, complete, stats): (String, Bool, JSONConstraintEngine.Stats) =
+            try await container.perform { context in
+                var history: [Chat.Message] = []
+                if !instructions.isEmpty { history.append(.system(instructions)) }
+                for turn in turns {
+                    switch turn.role {
+                    case .assistant: history.append(.assistant(turn.content))
+                    case .user, .system: history.append(.user(turn.content))
+                    }
+                }
+                let input = UserInput(chat: history)
+                let lmInput = try await context.processor.prepare(input: input)
+                let engine = JSONConstraintEngine(vocabulary: vocabulary,
+                                                  container: grammarContainer)
+                let processor = JSONConstrainedLogitProcessor(engine: engine)
+                var iterator = try TokenIterator(
+                    input: lmInput, model: context.model, cache: nil,
+                    processor: processor, sampler: parameters.sampler(),
+                    maxTokens: maxTokens)
+                var tokens: [Int] = []
+                while let token = iterator.next() {
+                    if vocabulary.eosTokenIDs.contains(token) { break }
+                    tokens.append(token)
+                    try Task.checkCancellation()   // C13: cooperatively evictable
+                }
+                return (context.tokenizer.decode(tokenIds: tokens),
+                        engine.isComplete, engine.stats)
+            }
+        lastStructuredStats = stats
+
+        // Honest finish reason: `.stop` only when the grammar completed a top-level value;
+        // a maxTokens truncation mid-value reports `.length`.
+        return LLMResponse(text: text, finishReason: complete ? .stop : .length)
     }
 
     /// One generation on a fresh `ChatSession`. `ChatSession` is not `Sendable`, so it is

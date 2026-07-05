@@ -143,10 +143,94 @@ func memBench(modelDir: String, model: GemmaModel) async throws {
     await pkg.unload()
 }
 
+/// Structured-output gate (N6, shared kit with mlx-qwen-llm-swift — the FULL 3-case × N=20
+/// statistical gate runs there on 0.8B-8bit; this one proves the SAME wiring holds on the
+/// SentencePiece/Gemma tokenizer + text factory).
+@InferenceActor
+func structuredGate(modelDir: String, model: GemmaModel, runs: Int) async throws {
+    let cfg = GemmaLLMConfiguration(model: model, modelDirectory: URL(fileURLWithPath: modelDir))
+    prewarmFiles(in: URL(fileURLWithPath: modelDir))
+    let pkg = GemmaLLMPackage(configuration: cfg)
+    try await pkg.load()
+    _ = try await pkg.run(LLMRequest(prompt: "Hi",
+                                     parameters: .init(temperature: 0, maxTokens: 8)))
+
+    struct Case { let name: String; let system: String; let user: String
+                  let format: ResponseFormat; let expectsArray: Bool }
+    let cases = [
+        Case(name: "parseFacts",
+             system: "You extract stable facts about the user. Respond with ONLY a JSON "
+                 + "array of short fact strings. No prose, no code fences.",
+             user: "User said: \"I'm Marisol, I live in Reykjavík with my two cats, and I "
+                 + "teach piano on weekends.\" Extract the facts.",
+             format: .json(container: .array), expectsArray: true),
+        Case(name: "parseAffect",
+             system: "You read the user's emotional state. Respond with ONLY a JSON object "
+                 + "{\"mood\": string, \"energy\": number 0..1, \"valence\": number -1..1}. No prose.",
+             user: "User said: \"today was a lot. the recital went fine but I'm wiped.\"",
+             format: .json(container: .object), expectsArray: false),
+        Case(name: "decideSearchQuery",
+             system: "Decide whether answering needs a web search. Respond with ONLY "
+                 + "{\"action\": \"search\", \"query\": \"<terms>\"} or {\"action\": \"none\"}.",
+             user: "User asked: \"what's the weather in Reykjavík this weekend?\"",
+             format: .json(container: .object), expectsArray: false),
+    ]
+
+    var failures: [String] = []
+    var maskSeconds = 0.0
+    var maskSteps = 0
+    for c in cases {
+        var ok = 0
+        var secs = 0.0
+        for _ in 0..<runs {
+            let t0 = Date()
+            let resp = try await pkg.run(LLMRequest(
+                messages: [.init(role: .system, content: c.system),
+                           .init(role: .user, content: c.user)],
+                parameters: .init(temperature: 0.7, topP: 0.95, maxTokens: 256),
+                responseFormat: c.format)) as! LLMResponse
+            secs += Date().timeIntervalSince(t0)
+            let trimmed = resp.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            let parsed = trimmed.data(using: .utf8)
+                .flatMap { try? JSONSerialization.jsonObject(with: $0) }
+            let containerOK = c.expectsArray ? parsed is [Any] : parsed is [String: Any]
+            if containerOK, resp.finishReason == .stop {
+                ok += 1
+            } else {
+                print("[structured]   ✗ \(c.name): \(trimmed.prefix(160))")
+            }
+            if let stats = pkg.lastStructuredStats {
+                maskSeconds += stats.maskSeconds
+                maskSteps += stats.steps
+            }
+        }
+        print(String(format: "[structured] %-18s strict-parse %2d/%d · avg %.2fs",
+                     (c.name as NSString).utf8String!, ok, runs, secs / Double(runs)))
+        if ok != runs { failures.append("\(c.name): \(ok)/\(runs) (must be 100%)") }
+    }
+    if maskSteps > 0 {
+        print(String(format: "[structured] masking overhead: %.3f ms/step over %d steps",
+                     maskSeconds / Double(maskSteps) * 1000, maskSteps))
+    }
+    await pkg.unload()
+    if failures.isEmpty {
+        print("[structured] PASS ✅")
+    } else {
+        print("[structured] FAIL ❌")
+        for f in failures { print("[structured]   - \(f)") }
+        exit(1)
+    }
+}
+
 let defaultGemma4ModelDir = "/Volumes/DEV_ARCHIVE/models/mlx-community/gemma-4-12b-it-4bit"
 
 let args = CommandLine.arguments
-let positional = args.dropFirst().filter { !$0.hasPrefix("--") }
+// Positional = everything that isn't a flag or a flag's value (--runs N).
+var nonFlagArgs = Array(args.dropFirst())
+if let i = nonFlagArgs.firstIndex(of: "--runs"), i + 1 < nonFlagArgs.count {
+    nonFlagArgs.remove(at: i + 1)
+}
+let positional = nonFlagArgs.filter { !$0.hasPrefix("--") }
 let gemma4 = args.contains("--gemma4")
 let model = gemma4
     ? GemmaModel(family: .gemma4, size: .b12, quant: .int4)
@@ -155,10 +239,16 @@ let modelDir = positional.first ?? (gemma4 ? defaultGemma4ModelDir : defaultMode
 
 if args.contains("--mem-bench") {
     try await memBench(modelDir: modelDir, model: model)
+} else if args.contains("--structured") {
+    var runs = 5
+    if let i = args.firstIndex(of: "--runs"), i + 1 < args.count, let n = Int(args[i + 1]) {
+        runs = n
+    }
+    try await structuredGate(modelDir: modelDir, model: model, runs: runs)
 } else if args.contains("--smoke") {
     try await smoke(modelDir: modelDir, model: model)
 } else {
-    print("usage: RunGemmaLLM --smoke | --mem-bench  [--gemma4]  [modelDir]")
+    print("usage: RunGemmaLLM --smoke | --mem-bench | --structured [--runs N]  [--gemma4]  [modelDir]")
     print("  default modelDir: \(defaultModelDir)")
     print("  default --gemma4 modelDir: \(defaultGemma4ModelDir)")
 }
