@@ -32,8 +32,9 @@ let package = Package(
         .library(name: "MLXGemmaLLM", targets: ["MLXGemmaLLM"]),
     ],
     dependencies: [
-        // ≥0.22.0: contract 1.16.0 — LLMRequest.responseFormat (structured output, N6).
-        .package(url: "https://github.com/xocialize/mlx-engine-swift", from: "0.22.0"),
+        // ≥0.27.0: run-lifecycle V4 — the CAN cancellation-conformance gate
+        // (MLXServeConformance CAN-1..3); also carries contract 1.16.0 responseFormat.
+        .package(url: "https://github.com/xocialize/mlx-engine-swift", from: "0.27.0"),
         // JSON grammar-constrained decoding (the responseFormat runtime, shared with the
         // qwen package).
         .package(url: "https://github.com/xocialize/mlx-constrained-decoding-swift", from: "0.1.0"),
