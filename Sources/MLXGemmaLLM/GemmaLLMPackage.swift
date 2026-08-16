@@ -180,6 +180,17 @@ public final class GemmaLLMPackage: ModelPackage {
         if let temperature = llm.parameters.temperature { parameters.temperature = Float(temperature) }
         if let topP = llm.parameters.topP { parameters.topP = Float(topP) }
         parameters.maxTokens = llm.parameters.maxTokens
+        // Contract 1.33.0: the canonical RNG pin. Left nil, mlx-swift-lm seeds the sampler from
+        // system entropy — so at the shipping enhancer temperature (0.7) the SAME prompt returns a
+        // DIFFERENT string every call, and a caller cannot reproduce its own run. That is not
+        // hypothetical: this package is what the LTX app's prompt enhancer generates through, and
+        // the audit that found the gap here (AB-R-0079) measured the drift on the identical seam
+        // (AB-A-0009: two runs, divergence at char 12). Set BEFORE the structured branch below so
+        // both decode paths carry it. Assign only when non-nil: writing through an unconditional
+        // `parameters.seed = llm.parameters.seed` would be equivalent today but silently pins the
+        // whole fleet the day mlx-swift-lm changes its own default. Inert at temperature 0.
+        // Gated by `RunGemmaLLM --seed-gate` (reproduce AND discriminate).
+        if let seed = llm.parameters.seed { parameters.seed = seed }
 
         // Structured output (contract 1.16.0): bypass ChatSession — mlx-swift-lm 3.31.x has
         // no processor-injection seam through GenerateParameters/ChatSession — and drive
