@@ -65,24 +65,58 @@ private func satisfiedModelDir() throws -> (dir: URL, cleanup: () -> Void) {
 
     // MARK: - Store-layout probe + resolution
 
-    @Test func storeLayoutSatisfiesAndResolves() throws {
+    @Test func flatStoreLayoutSatisfiesAndResolves() throws {
+        // The engine-executed FLAT layout (contract 1.24): files directly under
+        // `<root>/models--<org>--<name>/` — where MLXServeEngine's materializer (and this
+        // package's defensive WeightMaterializer) land them.
         let root = FileManager.default.temporaryDirectory
             .appending(path: "gemma-store-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: root) }
         let cfg = GemmaLLMConfiguration()
         // Empty store: the checkpoint is missing.
         #expect(cfg.missingWeightSources(storeRoot: root).count == 1)
-        // Populate the expected <root>/<org>/<name> layout.
-        let repoDir = root.appending(path: "mlx-community/gemma-3-12b-it-4bit")
+        let repoDir = root.appending(path: "models--mlx-community--gemma-3-12b-it-4bit")
         try FileManager.default.createDirectory(at: repoDir, withIntermediateDirectories: true)
         FileManager.default.createFile(
             atPath: repoDir.appending(path: "config.json").path, contents: Data([0]))
         #expect(cfg.missingWeightSources(storeRoot: root).isEmpty)
-        // Resolution lands on the store layout.
+        // No hub snapshot exists → resolution lands on the flat repo dir.
         #expect(cfg.resolvedModelDirectory(storeRoot: root)?.path == repoDir.path)
         // A sibling quant is a DIFFERENT repo dir — still missing.
         let int8 = GemmaLLMConfiguration(model: GemmaModel(size: .b12, quant: .int8))
         #expect(int8.missingWeightSources(storeRoot: root).count == 1)
+    }
+
+    @Test func hubSnapshotLayoutSatisfiesAndResolvesSnapshotFirst() throws {
+        // The hub-client layout (MS-1): `models--<org>--<name>/snapshots/<commit>/…` behind
+        // `refs/main`. The MS-2 probe accepts it, and resolution prefers the snapshot dir.
+        let root = FileManager.default.temporaryDirectory
+            .appending(path: "gemma-store-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let repoDir = root.appending(path: "models--mlx-community--gemma-3-12b-it-4bit")
+        let snapshot = repoDir.appending(path: "snapshots/abc123")
+        try FileManager.default.createDirectory(at: snapshot, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(
+            at: repoDir.appending(path: "refs"), withIntermediateDirectories: true)
+        try Data("abc123".utf8).write(to: repoDir.appending(path: "refs/main"))
+        FileManager.default.createFile(
+            atPath: snapshot.appending(path: "config.json").path, contents: Data([0]))
+        let cfg = GemmaLLMConfiguration()
+        #expect(cfg.missingWeightSources(storeRoot: root).isEmpty)
+        #expect(cfg.resolvedModelDirectory(storeRoot: root)?.path == snapshot.path)
+    }
+
+    @Test func legacyNestedLayoutReadsAsMissing() throws {
+        // The pre-MS-1 `<root>/<org>/<name>` form survives only as a MARKER-read tolerance —
+        // weights there were never where the hub client lands them, so it must not satisfy.
+        let root = FileManager.default.temporaryDirectory
+            .appending(path: "gemma-store-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let legacy = root.appending(path: "mlx-community/gemma-3-12b-it-4bit")
+        try FileManager.default.createDirectory(at: legacy, withIntermediateDirectories: true)
+        FileManager.default.createFile(
+            atPath: legacy.appending(path: "config.json").path, contents: Data([0]))
+        #expect(GemmaLLMConfiguration().missingWeightSources(storeRoot: root).count == 1)
     }
 
     @Test func explicitDirectoryWinsOverStore() throws {
@@ -104,8 +138,10 @@ private func satisfiedModelDir() throws -> (dir: URL, cleanup: () -> Void) {
         let root = URL(fileURLWithPath: "/tmp/some-store")
         var cfg = GemmaLLMConfiguration()
         cfg.modelsRootDirectory = root
+        // Nothing materialized at this root → no snapshot to prefer → the flat repo dir
+        // (MS-1 `models--<org>--<name>`).
         #expect(cfg.prewarmPaths.map(\.path)
-            == [root.appending(path: "mlx-community/gemma-3-12b-it-4bit").path])
+            == [root.appending(path: "models--mlx-community--gemma-3-12b-it-4bit").path])
         // Explicit directory still wins.
         cfg.modelDirectory = URL(fileURLWithPath: "/Volumes/DEV_ARCHIVE/models/gemma")
         #expect(cfg.prewarmPaths == [URL(fileURLWithPath: "/Volumes/DEV_ARCHIVE/models/gemma")])

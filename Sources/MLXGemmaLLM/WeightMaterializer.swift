@@ -3,7 +3,8 @@
 // models folder).
 //
 // Executes the `WeightSourcing` declaration on GemmaLLMConfiguration: each missing source's
-// repo is snapshot-downloaded into the engine ModelStore layout (`<root>/<org>/<name>/…`) via
+// repo is snapshot-downloaded into the engine ModelStore's flat layout
+// (`<root>/models--<org>--<name>/…`, MS-1 / contract 1.24) via
 // swift-huggingface's HubClient, with per-file progress forwarded to `WeightDownloadProgress`
 // so the engine's PreparationMonitor surfaces a real `.downloading(fraction:)` phase — a
 // download the monitor can't see is a conformance smell.

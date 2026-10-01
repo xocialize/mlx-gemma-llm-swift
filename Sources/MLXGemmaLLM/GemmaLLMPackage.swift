@@ -109,9 +109,10 @@ public final class GemmaLLMPackage: ModelPackage {
     /// Page the working set in. Idempotent when already resident.
     ///
     /// Dir-less configurations auto-materialize (engine ≥0.19.0): missing declared
-    /// `weightSources` download into the store's `<root>/<org>/<name>` layout with per-file
-    /// progress via `WeightDownloadProgress` (the engine binds the sink around this call and
-    /// surfaces `.downloading`), then loading proceeds from the store-resolved directory.
+    /// `weightSources` download into the store's `<root>/models--<org>--<name>` layout (MS-1)
+    /// with per-file progress via `WeightDownloadProgress` (the engine binds the sink around
+    /// this call and surfaces `.downloading`), then loading proceeds from the store-resolved
+    /// directory (hub snapshot first, else the flat repo dir).
     /// Explicit-directory configs never touch the network (the DEV_ARCHIVE / LTX-app case).
     public func load() async throws {
         guard container == nil else { return }
@@ -126,14 +127,17 @@ public final class GemmaLLMPackage: ModelPackage {
                     expected: "a published mlx-community quant or an explicit modelDirectory",
                     got: configuration.model.displayName)
             }
-            if let root = configuration.modelsRootDirectory,
-               let dir = ModelStore(root: root).directory(for: repo)
-            {
+            if let root = configuration.modelsRootDirectory {
                 // Auto-materialize into the engine-chosen models folder (caller holds
                 // security-scoped access), then load from the store layout.
                 let missing = configuration.missingWeightSources(storeRoot: root)
                 if !missing.isEmpty {
                     try await WeightMaterializer.materialize(missing, into: root)
+                }
+                // Resolve snapshot-first (hub layout), else the flat repo dir (MS-1).
+                guard let dir = configuration.resolvedModelDirectory(storeRoot: root) else {
+                    throw PackageError.configurationMismatch(
+                        expected: "a resolvable store directory for \(repo)", got: "nil")
                 }
                 loaded = try await #huggingFaceLoadModelContainer(
                     configuration: ModelConfiguration(directory: dir))

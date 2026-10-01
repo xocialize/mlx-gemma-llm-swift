@@ -64,21 +64,29 @@ extension GemmaLLMConfiguration: WeightSourcing {
     }
 
     /// Explicit `modelDirectory` first (the LTX shared-weights case — probe `config.json`),
-    /// then the ModelStore layout (`<root>/<org>/<name>`). Nil store + no explicit directory
-    /// ⇒ everything missing (the honest fresh-machine answer, MAT-4).
+    /// then the engine's MS-2 default probe against the canonical store — which accepts BOTH
+    /// the hub-client snapshot layout (`models--<org>--<name>/snapshots/<commit>/…`) and the
+    /// engine-executed flat layout (contract 1.24, files directly under the repo dir). Nil
+    /// store + no explicit directory ⇒ everything missing (the honest fresh-machine answer,
+    /// MAT-4).
     public func missingWeightSources(storeRoot: URL?) -> [WeightSource] {
-        weightSources.filter { source in
-            !Self.hasCheckpoint(at: modelDirectory)
-                && !Self.hasCheckpoint(at: ModelStore(root: storeRoot).directory(for: source.repo))
-        }
+        guard !Self.hasCheckpoint(at: modelDirectory) else { return [] }
+        return defaultMissingWeightSources(storeRoot: storeRoot)
     }
 
     /// Where `load()` reads the checkpoint from: the explicit `modelDirectory` always wins;
-    /// a nil directory resolves to the store layout (post-materialization home).
+    /// a nil directory resolves against the store — the materialized hub snapshot when one
+    /// exists (`snapshots/<commit>/` behind `refs/`), else the flat repo directory (the
+    /// engine-executed materialization destination, and this package's own defensive-download
+    /// target).
     public func resolvedModelDirectory(storeRoot: URL?) -> URL? {
         if let modelDirectory { return modelDirectory }
         guard let repo = weightsRepo else { return nil }
-        return ModelStore(root: storeRoot).directory(for: repo)
+        let store = ModelStore(root: storeRoot)
+        if let snapshot = store.snapshotDirectory(for: repo, revision: revision) {
+            return snapshot
+        }
+        return store.directory(for: repo)
     }
 
     /// A directory counts as carrying the checkpoint when `config.json` is present — the
